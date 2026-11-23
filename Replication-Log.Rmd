@@ -1,0 +1,510 @@
+---
+title: "Appendix: Code"
+author: "u2235356"
+date: "February 2026"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  tidy = TRUE,
+  tidy.opts = list(width.cutoff = 60)
+)
+
+library(tidyverse)
+library(haven)
+library(sf)
+library(RColorBrewer)
+library(fixest)
+library(panelsummary)
+library(modelsummary)
+library(kableExtra)
+library(sandwich)
+library(glmnet)
+library(reticulate)
+library(here)
+
+# --- Data Loading & Preprocessing ---
+data_dir <- here("data")
+
+# Spatial and commuting data (Figure 2, Table 3, Table 5, Table 6)
+pi_i_j <- read_dta(file.path(data_dir, "pi_i_j.dta"))
+woreda_map_sf <- st_read(file.path(data_dir, "shapefiles", "woreda_randomization_clean.shp"), quiet = TRUE)
+
+data_origin <- pi_i_j %>%
+  filter(O_woreda == D_woreda)
+
+woreda_map <- woreda_map_sf %>%
+  left_join(data_origin, by = c("new_woreda" = "O_woreda")) %>%
+  mutate(O_selected = ifelse(is.na(O_selected), -1, O_selected))
+
+our_palette_contour <- c("white", "black", "#D55E00")
+
+# Individual, household, and woreda-level data (Table 2, Table 3, Table 6)
+data_ind <- read_dta(file.path(data_dir, "data_ind.dta"))
+B_i_hh <- read_dta(file.path(data_dir, "B_i_hh.dta"))
+data <- read_dta(file.path(data_dir, "data_woreda.dta"))
+
+# Randomization Inference simulation files (Table 3)
+RI_treatment <- read_dta(file.path(data_dir, "RI_treatment.dta"))
+RI_exposure <- read_dta(file.path(data_dir, "RI_exposure.dta"))
+
+# Gravity / Poisson dataset (Table 5)
+data_poisson <- pi_i_j %>%
+  mutate(weight = 1)
+```
+
+The following is the replication project code. This is an RMarkdown PDF Render. Therefore, it acts as a log file because it would not render unless all code is correct. Additionally, I implemented Table 2 using fixest() which reduced their code by about 60% (they did not use fixest() but rather manually calculated clustered standard errors using vcovCL), so it lead to some statistically insignificant numerical processing differences whose effects can be seen downstream in the welfare calculations.
+
+# Figure 2: Commuting Rates as a Percentage of Workers by Woreda
+
+This section replicates Figure 2 from the original paper, showing commuting rates.
+
+### Figure 2a
+
+```{r fig2a}
+ggplot(woreda_map) +
+  geom_sf(aes(fill = O_B_commute_out, colour = factor(O_selected)), size = 1) +
+  scale_fill_gradientn(colours = rev(brewer.pal(9, "RdYlBu")), na.value = "grey80", name = "Commuting-Out") +
+  scale_colour_manual(name = "Treatment status", labels = c("Ineligible", "Control", "Treatment"), values = our_palette_contour) +
+  theme(legend.position = "bottom", plot.title = element_text(hjust = 0.5)) +
+  ggtitle("Panel A. Out-commuting")
+```
+
+### Figure 2b
+
+```{r fig2b}
+ggplot(woreda_map) +
+  geom_sf(aes(fill = D_B_commute_in, colour = factor(O_selected)), size = 1) +
+  scale_fill_gradientn(colours = rev(brewer.pal(9, "RdYlBu")), na.value = "grey80", name = "Commuting-In") +
+  scale_colour_manual(name = "Treatment status", labels = c("Ineligible", "Control", "Treatment"), values = our_palette_contour) +
+  theme(legend.position = "bottom", plot.title = element_text(hjust = 0.5)) +
+  ggtitle("Panel B. In-commuting")
+```
+
+\newpage
+
+# Table 2 - Effects on Employment and Amenities
+
+```{r table2, results='asis'}
+# Estimate models for Table 2. These model objects will be
+# used later in Table 6 calculations.
+est_emp_t2 <- feols(c(FE_share_hours_work, FE_share_hours_pw, FE_share_hours_nonpw) ~
+  selected | subcity, data = data_ind,
+  vcov = ~new_woreda, weights = ~FE_W_ind_weight, fsplit = ~eligible_pw,
+  nthreads = 4)
+
+est_amen_t2 <- feols(FE_B_i ~ selected | subcity, data = B_i_hh,
+  vcov = ~new_woreda, weights = ~FE_W_hh_weight, fsplit = ~eligible_pw,
+  nthreads = 4)
+
+# Define a custom function for panelsummary to get control
+# means
+glance_custom.fixest <- function(x, ...) {
+  data.frame(Control_mean_raw = mean(x$sumFE))
+}
+
+gm <- tribble(
+  ~raw, ~clean, ~fmt,
+  "Control_mean_raw", "Control mean", 3,
+  "nobs", "Observations", 0,
+)
+
+table_notes_t2 <- "In columns 1 to 3, the unit of observation is all working-age adults in our endline sample. In column 4 the sample is composed of one adult respondent per household (the household head or their spouse). ``Employment” denotes total hours worked divided by 48 hours per week. “Public employment” denotes hours worked on public works divided by 48 hours per week. ``Private employment” denotes hours worked on private sector wage work or self-employment divided by 48 hours per week. ``Neighborhood amenities” is a standardized index of answers to five questions about neighborhood quality described in online Appendix Table A6. ``Treatment” is a dummy equal to one for households in treated neighborhoods. All specifications include subcity fixed effects, individual and household controls. Standard errors are clustered at the neighborhood level."
+
+panelsummary(
+  list(est_emp_t2[1:3], est_amen_t2[1]),
+  list(est_emp_t2[7:9], est_amen_t2[3]),
+  list(est_emp_t2[4:6], est_amen_t2[2]),
+  italic = TRUE,
+  hline_after = FALSE,
+  panel_labels = c(
+    "Panel A: Whole sample",
+    "Panel B: Eligible households only",
+    "Panel C: Ineligible households only"
+  ),
+  colnames = c("", "Employment", "Public Employment", "Private Employment", "Neighborhood Amenities"),
+  coef_map = c(selected = "Treatment"),
+  gof_map = gm,
+  caption = "Effects on Employment and Amenities"
+) %>%
+  add_header_above(c(` ` = 1, `Share of hours spent on` = 3, ` ` = 1)) %>%
+  footnote(general = table_notes_t2, threeparttable = TRUE) %>%
+  kable_styling(
+    latex_options = c("booktabs", "hold_position"),
+    position = "center",
+    full_width = FALSE,
+    font_size = 10
+  )
+```
+
+# Table 3 - Effect of the Public Works Program on Private Sector Wages
+
+```{r table3}
+# This chunk replicates the models from Table 3 exactly as
+# in the original paper, using lm(). The resulting model
+# objects are saved for use in Table 6.
+
+# --- Data Preparation ---
+controls_origin <- data %>%
+  select(starts_with("FE_CW_I_")) %>%
+  names()
+data_RI_origin <- left_join(data, RI_treatment, by = "new_woreda") %>%
+  mutate(weight = 1) %>%
+  rename(selected = selected.x, subcity = subcity.x)
+
+controls_dest <- data_origin %>%
+  select(starts_with("D_FE_CC_I_")) %>%
+  names()
+data_RI_dest <- left_join(data_origin, RI_exposure, by = "D_woreda") %>%
+  mutate(weight = 1)
+
+# --- Model Estimation & RI --- Model 1
+formula1 <- FE_ln_earnings_hour_nonpw ~ selected + B_ln_earnings_hour_nonpw +
+  as.factor(subcity)
+r_naive_nocon <- lm(formula1, data = data_RI_origin, na.action = na.omit,
+  weights = weight)
+t_actual1 <- summary(r_naive_nocon)$coefficients["selected", "t value"]
+t_sim1 <- sapply(1:2000, function(x) {
+  f_sim <- as.formula(paste0("FE_ln_earnings_hour_nonpw ~ selected_potential_",
+    x, " + B_ln_earnings_hour_nonpw + as.factor(subcity)"))
+  m_sim <- lm(f_sim, data = data_RI_origin, na.action = na.omit,
+    weights = weight)
+  summary(m_sim)$coefficients[2, 3]
+})
+p_value1 <- mean(c(t_actual1, t_sim1)^2 >= t_actual1^2, na.rm = TRUE)
+
+# Model 2
+formula2 <- as.formula(paste("FE_ln_earnings_hour_nonpw ~ selected + B_ln_earnings_hour_nonpw +",
+  paste(controls_origin, collapse = "+"), "+ as.factor(subcity)"))
+r_naive <- lm(formula2, data = data_RI_origin, na.action = na.omit,
+  weights = weight)
+t_actual2 <- summary(r_naive)$coefficients["selected", "t value"]
+t_sim2 <- sapply(1:2000, function(x) {
+  f_sim <- as.formula(paste0("FE_ln_earnings_hour_nonpw ~ selected_potential_",
+    x, " + B_ln_earnings_hour_nonpw + ", paste(controls_origin,
+      collapse = "+"), "+ as.factor(subcity)"))
+  m_sim <- lm(f_sim, data = data_RI_origin, na.action = na.omit,
+    weights = weight)
+  summary(m_sim)$coefficients[2, 3]
+})
+p_value2 <- mean(c(t_actual2, t_sim2)^2 >= t_actual2^2, na.rm = TRUE)
+
+# Model 3
+formula3 <- D_FE_ln_wage ~ D_exposure_rec + D_B_ln_wage
+r_spill_nocon <- lm(formula3, data = data_RI_dest, na.action = na.omit,
+  weights = weight)
+t_actual3 <- summary(r_spill_nocon)$coefficients["D_exposure_rec", "t value"]
+t_sim3 <- sapply(1:2000, function(x) {
+  f_sim <- as.formula(paste0("D_FE_ln_wage ~ D_exposure_rec_",
+    x, " + D_B_ln_wage"))
+  m_sim <- lm(f_sim, data = data_RI_dest, na.action = na.omit,
+    weights = weight)
+  summary(m_sim)$coefficients[2, 3]
+})
+p_value3 <- mean(c(t_actual3, t_sim3)^2 >= t_actual3^2, na.rm = TRUE)
+
+# Model 4
+formula4 <- as.formula(paste("D_FE_ln_wage ~ D_exposure_rec + D_B_ln_wage +",
+  paste(controls_dest, collapse = "+")))
+r_spill <- lm(formula4, data = data_RI_dest, na.action = na.omit,
+  weights = weight)
+t_actual4 <- summary(r_spill)$coefficients["D_exposure_rec", "t value"]
+t_sim4 <- sapply(1:2000, function(x) {
+  f_sim <- as.formula(paste0("D_FE_ln_wage ~ D_exposure_rec_",
+    x, " + D_B_ln_wage + ", paste(controls_dest, collapse = "+")))
+  m_sim <- lm(f_sim, data = data_RI_dest, na.action = na.omit,
+    weights = weight)
+  summary(m_sim)$coefficients[2, 3]
+})
+p_value4 <- mean(c(t_actual4, t_sim4)^2 >= t_actual4^2, na.rm = TRUE)
+
+# --- Table Generation ---
+glance_custom.lm <- function(x, ri_p_val = NULL, ...) {
+  if (!is.null(ri_p_val))
+    data.frame(`RI p-value` = ri_p_val) else data.frame()
+}
+
+table_notes_t3 <- "The unit of observation is a neighborhood. In columns 1 and 2, the dependent variable is log hourly earnings from private sector work (excluding public works) earned by workers who live in that neighborhood. In column 1 the specification includes only subcity fixed effects. In column 2 the specification also includes worker controls. In columns 3 and 4, the dependent variable is log hourly earnings from private sector work (excluding public works) earned by workers who work in that neighborhood. In column 3 the specification does not include any controls. In column 4 the specification controls for the characteristics of workers who work in the neighborhood. “Treatment” is a dummy equal to one if the neighborhood is treated. “Exposure” of a neighborhood j is defined as the sum of the treatment status of each neighborhood i weighted by the fraction of residents from i who work in neighborhood j . The sum includes neighborhood j itself. Exposure is re-centered following Borusyak and Hull (2023) using average exposure across 2,000 simulated treatment assignments. RI p-values are p-values obtained through randomization inference, with 2,000 simulated treatment assignments"
+
+modelsummary(
+  list(
+    `log wages at origin` = list(`(1)` = r_naive_nocon, `(2)` = r_naive),
+    `log wages at destination` = list(`(3)` = r_spill_nocon, `(4)` = r_spill)
+  ),
+  output = "markdown",
+  shape = "cbind",
+  fmt = 3,
+  coef_map = c(selected = "Treatment at Origin", D_exposure_rec = "Exposure of Destination"),
+  gof_map = list(list(raw = "nobs", clean = "Observations", fmt = "%.0f")),
+  add_rows = data.frame(
+    term = c("Worker Controls", "RI p-value"),
+    `(1)` = c("No", sprintf("%.3f", p_value1)),
+    `(2)` = c("Yes", sprintf("%.3f", p_value2)),
+    `(3)` = c("No", sprintf("%.3f", p_value3)),
+    `(4)` = c("Yes", sprintf("%.3f", p_value4)),
+    check.names = FALSE
+  ),
+  title = "Effect of the Public Works Program on Private Sector Wages",
+  notes = table_notes_t3,
+  threeparttable = TRUE
+)
+```
+
+\newpage
+
+# Table 5 - Gravity: The Effect of Wages on Commuting
+
+```{r table5, tidy=FALSE}
+# This chunk replicates the models from Table 5 exactly as in the original paper, using glm() and lm().
+# The resulting IV model is saved for use in Table 6.
+
+# Model 1: OLS Poisson
+formula_ols <- O_FE_pi_i_j ~ D_FE_ln_wage + ln_walking_time + D_B_ln_wage + as.factor(O_woreda)
+r_wage_poisson <- glm(formula_ols, data = data_poisson, family = poisson(link = "log"), na.action = na.omit, weights = weight)
+se1 <- sqrt(diag(vcovCL(r_wage_poisson, cluster = ~D_woreda)))
+
+# Models 2 & 3: Manual IV
+# First Stage
+formula_fs <- D_FE_ln_wage ~ D_exposure_rec + ln_walking_time + D_B_ln_wage + as.factor(O_woreda)
+r_wage_poisson_fs <- lm(formula_fs, data = data_poisson, na.action = na.omit, weights = weight)
+se_fs <- sqrt(diag(vcovCL(r_wage_poisson_fs, cluster = ~D_woreda)))
+data_poisson$control_wage <- residuals(r_wage_poisson_fs)
+
+# Second Stage
+formula_iv <- O_FE_pi_i_j ~ D_FE_ln_wage + ln_walking_time + control_wage + D_B_ln_wage + as.factor(O_woreda)
+r_wage_poisson_iv <- glm(formula_iv, data = data_poisson, family = poisson(link = "log"), na.action = na.omit, weights = weight)
+se_iv <- sqrt(diag(vcovCL(r_wage_poisson_iv, cluster = ~D_woreda)))
+
+# --- Table Generation ---
+se_list_t5 <- list(se1, se_iv, se_fs)
+note_t5 <- "Notes: The unit of observation is a neighborhood origin × destination pair. The dependent variable is the commuting probability. “log destination wage” is the log of private sector income per hour earned by workers who work in the neighborhood of destination. “Destination exposure to the program” is for each neighborhood of destination j equal to the sum of treatment status of all neighborhoods i weighted by the commuting probability from i to j . Following Borusyak and Hull (2023), we re-center actual exposure using average exposure to 2,000 simulated treatment assignments. “log walking time” is the log of minutes needed to walk betweenthe centroid of the origin and destination neighborhoods according to Google API. In column 1 the estimation is done with OLS. In column 2 log destination wage is instrumented with the destination exposure to the program. Column 3 presents the first stage of the estimation. All specifications include origin fixed effects. Standard errors are clustered at the destination level."
+
+modelsummary(list(
+  "Commmuting probability" = list(
+    "Poisson" = r_wage_poisson,
+    "Poisson-IV" = r_wage_poisson_iv),
+  "log destination wage" = list(
+    "First-stage OLS" = r_wage_poisson_fs
+  )),
+  vcov = se_list_t5,
+  shape = "cbind",
+  output = "markdown", # Specify filename directly
+  coef_map = c("D_FE_ln_wage" = "Log Destination Wage",
+               "D_exposure_rec" = "Destination Exposure to Program",
+               "ln_walking_time" = "Log walking time"),
+  gof_map = list(list("raw" = "nobs", "clean" = "Observations", "fmt" = 0)),
+  title = "Gravity: The Effect of Wages on Commuting",
+  add_header_above = c(" " = 1, "Commuting Probability" = 2, "Log Destination Wage" = 1),
+  notes = note_t5,
+  threeparttable = TRUE
+)
+```
+
+# Table 6 - Welfare Effects of the Public Works Program
+
+```{r table6, tidy=FALSE}
+# This chunk calculates the parameters from the previously estimated models and then computes the welfare effects.
+
+
+# --- 1. Extract Parameters from Saved Model Objects ---
+
+
+# p and L_i (from Table 2 models)
+
+r_nonpw_ind_t2 <- est_emp_t2[[3]] # Third model in the list is FE_share_hours_nonpw
+L_i <- mean(data_ind$FE_share_hours_work[data_ind$selected == 0], na.rm = TRUE)
+p <- -coef(r_nonpw_ind_t2)["selected"] / L_i
+
+
+# wage_effect (from Table 3 model 'r_spill')
+
+wage_effect <- coef(r_spill)["D_exposure_rec"]
+
+
+# beta_i (requires running Table 4 models)
+
+# Lasso for amenity controls
+
+FE_controls <- B_i_hh %>% select(starts_with("FE_c_")) %>% as.matrix()
+
+FE_outcome <- B_i_hh %>% select(FE_B_i) %>% as.matrix()
+
+cv_output_B <- cv.glmnet(FE_controls[!is.na(FE_outcome), ], FE_outcome[!is.na(FE_outcome)], alpha = 1)
+
+controls_selected_B <- colnames(FE_controls)[which(coef(cv_output_B, s = "lambda.min")[-1] != 0)]
+
+formula_B <- as.formula(paste("FE_B_i ~ selected +", paste(controls_selected_B, collapse = "+"), "+ as.factor(subcity)"))
+
+r_index_quality_controls_ind <- lm(formula_B, data = B_i_hh, na.action = na.omit, weights = FE_W_hh_weight)
+
+# Lasso for rent controls
+
+SE_controls <- B_i_hh %>% select(starts_with("SE_c_")) %>% as.matrix()
+
+SE_ln_r_i <- B_i_hh %>% select(SE_ln_r_i) %>% as.matrix()
+
+valid_rows <- !is.na(SE_ln_r_i) & !is.na(B_i_hh$SE_B_i)
+
+cv_output_r <- cv.glmnet(SE_controls[valid_rows, ], SE_ln_r_i[valid_rows], alpha = 1)
+
+controls_selected_r_i <- colnames(SE_controls)[which(coef(cv_output_r, s = "lambda.min")[-1] != 0)]
+
+formula_rent <- as.formula(paste("SE_ln_r_i ~ SE_B_i +", paste(controls_selected_r_i, collapse = "+"), "+ as.factor(subcity)"))
+
+r_rent_quality_controls <- lm(formula_rent, data = B_i_hh, na.action = na.omit)
+
+beta_i <- coef(r_rent_quality_controls)["SE_B_i"] * coef(r_index_quality_controls_ind)["selected"]
+
+
+# theta (from Table 5 model 'r_wage_poisson_iv')
+
+theta <- coef(r_wage_poisson_iv)["D_FE_ln_wage"]
+
+
+# g (pw wage premium)
+
+w_g <- mean(data$FE_ln_earnings_hour_pw[data$selected == 1], weights = data$FE_W_woreda_weight[data$selected == 1], na.rm = TRUE)
+
+data_g <- data %>% select(new_woreda, B_ln_earnings_hour_nonpw) %>% mutate(g = w_g - B_ln_earnings_hour_nonpw)
+
+
+# --- 2. Welfare Calculations ---
+
+sum_wage_effects <- pi_i_j %>%
+  mutate(sum_wage_effects = O_B_pi_i_j * (1 + wage_effect * D_exposure)^(theta)) %>%
+  group_by(O_woreda) %>%
+  summarise(sum_wage_effects = sum(sum_wage_effects, na.rm = TRUE))
+
+
+sum_wage_effects_full <- pi_i_j %>%
+  mutate(sum_wage_effects_full = O_B_pi_i_j * (1 + wage_effect)^(theta)) %>%
+  group_by(O_woreda) %>%
+  summarise(sum_wage_effects_full = sum(sum_wage_effects_full, na.rm = TRUE))
+
+
+data_welfare <- data_origin %>%
+  left_join(sum_wage_effects, by = "O_woreda") %>%
+  left_join(sum_wage_effects_full, by = "O_woreda") %>%
+  left_join(data_g, by = c("O_woreda" = "new_woreda")) %>%
+  mutate(
+    # Partial Rollout
+    u_i = O_selected * (1 + beta_i) * (p * (1 + g) * (1 - O_B_commute_out)^(1 / theta) + (1 - p) * (sum_wage_effects)^(1 / theta)) + (1 - O_selected) * (sum_wage_effects)^(1 / theta),
+    u_i_no_amenity = O_selected * (p * (1 + g) * (1 - O_B_commute_out)^(1 / theta) + (1 - p) * (sum_wage_effects)^(1 / theta)) + (1 - O_selected) * (sum_wage_effects)^(1 / theta),
+    u_i_no_wage_no_amenity = O_selected * ((1 - p) + p * (1 + g) * (1 - O_B_commute_out)^(1 / theta)) + (1 - O_selected),
+    u_i_cash = O_selected * (1 + p * (1 + g) * (1 - O_B_commute_out)^(1 / theta)) + (1 - O_selected),
+
+    # Full Rollout
+    u_i_full = (1 + beta_i) * (p * (1 + g) * (1 - O_B_commute_out)^(1 / theta) + (1 - p) * sum_wage_effects_full^(1 / theta)),
+    u_i_full_no_amenity = (p * (1 + g) * (1 - O_B_commute_out)^(1 / theta) + (1 - p) * sum_wage_effects_full^(1 / theta)),
+    u_i_full_no_wage_no_amenity = (p * (1 + g) * (1 - O_B_commute_out)^(1 / theta) + (1 - p)),
+    u_i_cash_full = (1 + p * (1 + g) * (1 - O_B_commute_out)^(1 / theta))
+
+  )
+
+
+# --- 3. Create Summary Table ---
+
+table_by_selected <- data_welfare %>%
+  group_by(O_selected) %>%
+  summarise(across(c(D_exposure, u_i_no_wage_no_amenity, u_i_no_amenity, u_i, u_i_cash), ~ weighted.mean(.x, O_W_woreda_weight, na.rm = TRUE))) %>%
+  mutate(across(-c(O_selected, D_exposure), ~ . - 1))
+
+
+table_full <- data_welfare %>%
+  summarise(
+    O_selected = 1, D_exposure = 1,
+    across(c(u_i_full_no_wage_no_amenity, u_i_full_no_amenity, u_i_full, u_i_cash_full), ~ weighted.mean(.x, O_W_woreda_weight, na.rm = TRUE))
+  ) %>%
+  mutate(across(-c(O_selected, D_exposure), ~ . - 1))
+
+
+# Rename for binding
+names(table_by_selected) <- c("Treatment", "Exposure", "Direct Effect", "Direct + Wage Effects", "Direct + Wage + Amenity", "Cash Transfer")
+names(table_full) <- names(table_by_selected)
+
+
+# Combine and transpose
+final_table_data <- t(rbind(table_by_selected, table_full))
+
+
+# --- 4. Print Kable ---
+kable(final_table_data, format = "markdown", digits = 3, col.names = c("Control", "Treatment", "All"), align = "c",
+      caption = "Welfare Effects of the Public Works Program")
+```
+
+# Figure 2: Python Implementation
+
+This section replicates Figure 2 using Python's `geopandas` and `matplotlib` libraries.
+
+```{python fig2_py, tidy=FALSE}
+import pandas as pd
+import geopandas as gpd
+import matplotlib.pyplot as plt
+from pathlib import Path
+from matplotlib.lines import Line2D
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+# --- Setup & Data Loading ---
+try:
+    import here
+    base_path = Path(here.here())
+except ImportError:
+    base_path = Path(r'D:/Project Portfolio/replication_aer_114-5-_1382-1414')
+
+pi_i_j = pd.read_stata(base_path / "data" / "pi_i_j.dta")
+woreda_map_sf = gpd.read_file(base_path / "data" / "shapefiles" / "woreda_randomization_clean.shp")
+
+data_origin = pi_i_j[pi_i_j['O_woreda'] == pi_i_j['D_woreda']].copy()
+woreda_map = woreda_map_sf.merge(data_origin, left_on='new_woreda', right_on='O_woreda', how='left')
+
+woreda_map['O_selected_cat'] = 1.0
+woreda_map.loc[woreda_map['O_selected'] == 0, 'O_selected_cat'] = 2.0
+woreda_map.loc[woreda_map['O_selected'] == 1, 'O_selected_cat'] = 3.0
+woreda_map['border_color'] = woreda_map['O_selected_cat'].map({1.0: 'white', 2.0: 'black', 3.0: '#D55E00'})
+
+# --- Plotting ---
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 10))
+
+legend_elements = [
+    Line2D([0], [0], color='white', markeredgecolor='black', marker='s', linestyle='None', markersize=10, label='Ineligible'),
+    Line2D([0], [0], color='black', marker='s', linestyle='None', markersize=10, label='Control'),
+    Line2D([0], [0], color='#D55E00', marker='s', linestyle='None', markersize=10, label='Treatment')
+]
+
+# Helper to ensure map size consistency
+for ax in [ax1, ax2]:
+    ax.set_aspect('equal')
+
+# Panel A: Out-commuting (Left Cbar)
+div1 = make_axes_locatable(ax1)
+cax1 = div1.append_axes("right", size="5%", pad=0.1)
+woreda_map.plot(column='O_B_commute_out', ax=ax1, cax=cax1, legend=True,
+                legend_kwds={'label': "Commuting-Out", 'orientation': "vertical"},
+                cmap='RdYlBu_r', missing_kwds={'color': 'lightgrey'},
+                edgecolor=woreda_map['border_color'], linewidth=1.0)
+ax1.set_title("Panel A. Out-commuting", fontsize=16)
+ax1.set_axis_off()
+
+# Panel B: In-commuting (Right Cbar)
+div2 = make_axes_locatable(ax2)
+cax2 = div2.append_axes("right", size="5%", pad=0.1)
+woreda_map.plot(column='D_B_commute_in', ax=ax2, cax=cax2, legend=True,
+                legend_kwds={'label': "Commuting-In", 'orientation': "vertical"},
+                cmap='RdYlBu_r', missing_kwds={'color': 'lightgrey'},
+                edgecolor=woreda_map['border_color'], linewidth=1.0)
+ax2.set_title("Panel B. In-commuting", fontsize=16)
+ax2.set_axis_off()
+
+# Shared Legend
+fig.legend(handles=legend_elements, title="Treatment status", loc='lower center',
+           bbox_to_anchor=(0.5, 0.1), ncol=3, frameon=False)
+
+plt.subplots_adjust(wspace=0.3) # Adjust spacing between the two maps
+plt.show()
+```

@@ -1,0 +1,70 @@
+# ==============================================================================
+# Source Data Files
+# ==============================================================================
+data/
+**/data/
+*.dta
+*.shp
+*.shx
+*.dbf
+*.prj
+*.cpg
+*.qpj
+*.sbn
+*.sbx
+*.rds
+*.RData
+*.rda
+*.csv
+*.xlsx
+*.xls
+*.gpkg
+*.geojson
+
+# ==============================================================================
+# LaTeX Build & Auxiliary Files (Keep final PDFs)
+# ==============================================================================
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.brf
+*.fdb_latexmk
+*.fls
+*.idx
+*.ilg
+*.ind
+*.lof
+*.log
+*.lol
+*.lot
+*.nav
+*.out
+*.run.xml
+*.snm
+*.synctex
+*.synctex(busy)
+*.synctex.gz
+*.synctex.gz(busy)
+*.toc
+*.tex
+*.vrb
+*.xdv
+*.minted
+_minted*/
+**/_minted*/
+
+# ==============================================================================
+# R / RMarkdown / Python Environments & Cache
+# ==============================================================================
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+*_cache/
+*_files/
+__pycache__/
+.venv/
+venv/
+.DS_Store
+Thumbs.db
